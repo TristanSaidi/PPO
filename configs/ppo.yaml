@@ -1,0 +1,35 @@
+seed: 42
+network:
+  mlp:
+    units: [10, 10, 10]
+
+checkpoint: '' # path to the checkpoint to load
+device: 'cuda:0'
+
+ppo:
+  normalize_input: True
+  normalize_value: True
+  value_bootstrap: True
+  num_actors: 1
+  normalize_advantage: True
+  gamma: 0.99
+  tau: 0.95
+  learning_rate: 5e-3
+  kl_threshold: 0.02
+  # PPO batch collection
+  horizon_length: 8
+  minibatch_size: 8
+  mini_epochs: 5
+  # PPO loss setting
+  clip_value: True
+  critic_coef: 4
+  entropy_coef: 0.0
+  e_clip: 0.2
+  bounds_loss_coef: 0.0001
+  # grad clipping
+  truncate_grads: True
+  grad_norm: 1.0
+  # snapshot setting
+  save_best_after: 0
+  save_frequency: 50
+  max_agent_steps: 100000
