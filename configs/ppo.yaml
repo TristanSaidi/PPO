@@ -14,12 +14,11 @@ ppo:
   normalize_advantage: True
   gamma: 0.99
   tau: 0.95
-  learning_rate: 5e-3
+  learning_rate: 3e-4
   kl_threshold: 0.02
   # PPO batch collection
-  horizon_length: 8
-  minibatch_size: 8
-  mini_epochs: 5
+  horizon_length: 2048
+  mini_epochs: 10
   # PPO loss setting
   clip_value: True
   critic_coef: 4
@@ -32,4 +31,5 @@ ppo:
   # snapshot setting
   save_best_after: 0
   save_frequency: 50
-  max_agent_steps: 100000
+  max_agent_steps: 1000000
+  max_episode_steps: 200

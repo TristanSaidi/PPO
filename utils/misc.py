@@ -1,4 +1,6 @@
 # from https://github.com/leggedrobotics/rsl_rl/blob/master/rsl_rl/algorithms/ppo.py
+import torch
+import numpy as np
 
 class AdaptiveScheduler(object):
     def __init__(self, kl_threshold=0.008):

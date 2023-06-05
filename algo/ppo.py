@@ -28,10 +28,10 @@ class PPO(object):
         self.set_ppo_train_params(config["ppo"])
         self.set_ppo_rollout_params(config["ppo"])
         self.configure_saving(config["ppo"])
+        self.configure_tensorboard()
         self.episode_rewards = AverageScalarMeter(100)
         self.episode_lengths = AverageScalarMeter(100)
-        self.obs = None
-        self.epoch_num = 0
+        self.iter_num = 0
 
     def build_environment(self, env, config):
         self.env = env
@@ -84,13 +84,13 @@ class PPO(object):
         self.normalize_advantage = ppo_config["normalize_advantage"]
         self.normalize_input = ppo_config["normalize_input"]
         self.normalize_value = ppo_config["normalize_value"]
+        self.max_agent_steps = ppo_config["max_agent_steps"]
+        self.max_episode_length = ppo_config["max_episode_steps"]
 
     def set_ppo_rollout_params(self, ppo_config):
         self.horizon_length = ppo_config["horizon_length"]
         self.batch_size = self.horizon_length * self.num_actors
-        self.minibatch_size = ppo_config["minibatch_size"]
-        self.mini_epochs_num = ppo_config["mini_epochs"]
-        assert self.batch_size % self.minibatch_size == 0
+        self.mini_epochs = ppo_config["mini_epochs"]
 
     def configure_saving(self, ppo_config):
         self.save_freq = ppo_config["save_frequency"]
@@ -100,24 +100,154 @@ class PPO(object):
         self.extra_info = {}
         self.writer = SummaryWriter(self.output_tb)
 
-    def clear_stats(self):
-        pass
-
     def train(self):
-        pass
+        """ 
+        Main train loop for the PPO agent. This function calls
+        train_iter() in a loop until the maximum number of steps
+        is exceeded.
+        """ 
+        self.env.reset()
+        self.agent_steps = self.batch_size
 
-    def train_epoch(self):
-        pass
+        while self.agent_steps < self.max_agent_steps:
+            self.iter_num += 1
+            self.agent_steps += self.batch_size
+            self.update_policy()
+            print(f"Average Episode Reward: {self.episode_rewards.get_mean()}")
+            print(f"Iteration: {self.iter_num}")
+            self._logger()
 
-    def get_full_state_weights(self):
-        pass
 
-    def set_full_state_weights(self, weights):
-        pass
+    def update_policy(self):
 
-    def get_weights(self):
-        pass
+        rollout_dict = self.rollout()
+        rollout_observations = rollout_dict["rollout_observations"]
+        rollout_values = rollout_dict["rollout_values"]
+        rollout_actions = rollout_dict["rollout_actions"]
+        rollout_log_probabilities = rollout_dict["rollout_log_probabilities"]
+        rollout_rtgs = rollout_dict["rollout_rtgs"]
 
-    def set_weights(self, weights):
-        pass
+        # compute advantage
+        A = rollout_rtgs - rollout_values.detach()
+        # if self.normalize_advantage:
+        #     # normalize advantage
+        #     # helps with training stability according to: https://github.com/ericyangyu/PPO-for-Beginners
+        #     A = (A - A.mean()) / (A.std() + 1e-10)
+        # perform optimization for mini_epochs
+        for k in range(self.mini_epochs):
+
+            action_log_probs = self.model.calculate_action_likelihood(
+                rollout_observations,
+                rollout_actions
+            )
+
+            # calculate r_theta
+            r_theta = torch.exp(action_log_probs - rollout_log_probabilities)
+            # calculate surrogate loss 1
+            surrogate_loss_1 = A * r_theta
+            # calculate surrogate loss 2
+            surrogate_loss_2 = A * torch.clamp(r_theta, 1 - self.e_clip, 1 + self.e_clip)
+
+            actor_loss = -1 * torch.min(surrogate_loss_1, surrogate_loss_2).mean()
+            
+            critic_loss = (rollout_values - rollout_rtgs) ** 2
+            loss = actor_loss + 0.5 * critic_loss.mean()
+
+            self.optimizer.zero_grad()
+            loss.backward()
+            self.optimizer.step()
+
+    def rollout(self):
+        """
+        Rollout the agent for horizon_length number of steps.
+        
+        Returns: tuple containing info about the rollout
+        """
+
+        rollout_observations = []
+        rollout_values = []
+        rollout_actions = []
+        rollout_log_probabilities = []
+        rollout_rewards = []
+
+        obs, _ = self.env.reset()
+        done = False
+        # keep track of episode len and reward to log averages
+        total_rollout_time = 0
+
+        # loop for entire rollout horizon
+        while total_rollout_time <= self.horizon_length:
+            
+            episode_rewards = []
+            episode_values = []
+            episode_length = 0
+            done = False
+
+            # loop for single episode
+            while not done and episode_length <= self.max_episode_length:
+                # sample a_t from policy
+                obs = torch.tensor(obs, device=self.device)
+                actor_critic_dict = self.model.train_act(obs)
+
+                # store o_t, v(o_t)
+                rollout_observations.append(obs)
+                episode_values.append(actor_critic_dict["value"])
+
+                action = actor_critic_dict["action"]
+                action_log_prob = actor_critic_dict["action_log_prob"]
+                
+                # apply a_t to environment
+                obs, reward, done, info, _ = self.env.step(action.cpu().numpy())
+                
+                # store a_t, log_prob, r_t, v(o_t)
+                rollout_actions.append(action.item())
+                rollout_log_probabilities.append(action_log_prob)
+
+                # update episode length and reward
+                episode_rewards.append(reward)
+                episode_length += 1
+                total_rollout_time += 1
+            
+            # update running average episode length and reward
+            self.episode_rewards.update(torch.tensor(episode_rewards, device=self.device).mean().unsqueeze(0))
+            self.episode_lengths.update(torch.tensor([episode_length], device=self.device))
+
+            # add episode reward and value information to rollout buffers
+            rollout_rewards.append(episode_rewards)
+            rollout_values.append(episode_values)
+
+        # compute reward-to-go for each visited state in the rollout
+        rollout_rtgs = self.compute_rtgs(rollout_rewards, rollout_values)
+        # flatten rollout values
+        rollout_values = [val for ep_vals in rollout_values for val in ep_vals]
+        # convert to torch tensors and store in dictionary
+        rollout_dict = {
+            "rollout_observations" : torch.stack(rollout_observations),
+            "rollout_values" : torch.stack(rollout_values),
+            "rollout_actions" : torch.tensor(rollout_actions, dtype=torch.float, device=self.device),
+            "rollout_log_probabilities" : torch.tensor(rollout_log_probabilities, dtype=torch.float, device=self.device),
+            "rollout_rtgs" : torch.tensor(rollout_rtgs, device=self.device).unsqueeze(1)
+        }
+        
+        return rollout_dict
+
+    def compute_rtgs(self, rollout_rewards, rollout_values):
+
+        rollout_rtgs = []
+        for (episode_rewards, episode_values) in zip(reversed(rollout_rewards), reversed(rollout_values)):
+            # start with value from final timestep of the episode
+            discounted_future_reward = episode_values[-1]
+            # iterate backwards through the episode, computing rtg for each timestep
+            for reward_t in reversed(episode_rewards):
+                discounted_future_reward = reward_t + self.gamma * discounted_future_reward
+                rollout_rtgs.insert(0, discounted_future_reward)
+        
+        return rollout_rtgs
+
+    def _logger(self):
+        self.writer.add_scalar('episode_rewards/step', self.episode_rewards.get_mean(), self.agent_steps)
+
+
+
+    
 

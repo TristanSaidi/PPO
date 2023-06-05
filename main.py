@@ -49,8 +49,8 @@ def set_seed(seed):
     return seed
 
 def test_agent(env, ppo_config):
+    
     policy = PPO(env, ppo_config)
-
     obs, _ = env.reset()
 
     while True:
@@ -64,8 +64,9 @@ def test_agent(env, ppo_config):
     
     env.close()
 
-def train(env, output_dir, ppo_config):
-    pass
+def train_agent(env, ppo_config):
+    policy = PPO(env, ppo_config)
+    policy.train()
 
 @hydra.main(config_name='ppo', config_path='configs')
 def main(ppo_config: DictConfig)->int:
@@ -76,7 +77,7 @@ def main(ppo_config: DictConfig)->int:
 
     parser.add_argument(
         '--test',
-        default = True,
+        default = False,
         type = bool
     )
 
@@ -88,7 +89,7 @@ def main(ppo_config: DictConfig)->int:
 
     parser.add_argument(
         '--experiment',
-        default = 'outputs/ppo_agent',
+        default = 'ppo_agent',
         type = str
     )
 
@@ -109,11 +110,12 @@ def main(ppo_config: DictConfig)->int:
     ppo_config["checkpoint"] = command_configs["checkpoint"]
     ppo_config["experiment"] = command_configs["experiment"]
 
-    env = gym.make(command_configs['env'], render_mode='human')
 
     if command_configs["test"]:
+        env = gym.make(command_configs['env'], render_mode='human')
         test_agent(env, ppo_config)
     else:
+        env = gym.make(command_configs['env'])
         train_agent(env, ppo_config)
 
     return 0
