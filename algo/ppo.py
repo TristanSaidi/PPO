@@ -12,9 +12,7 @@ import gym
 import torch
 from tensorboardX import SummaryWriter
 
-from networks.running_mean_std import RunningMeanStd
 from utils.misc import AdaptiveScheduler, AverageScalarMeter
-from utils.replay_buffer import ReplayBuffer
 from networks.model import ActorCritic
 
 class PPO(object):
@@ -29,7 +27,7 @@ class PPO(object):
         self.set_ppo_rollout_params(config["ppo"])
         self.configure_saving(config["ppo"])
         self.configure_tensorboard()
-        self.episode_rewards = AverageScalarMeter(100)
+        self.latest_episode_rewards = 0
         self.episode_lengths = AverageScalarMeter(100)
         self.iter_num = 0
 
@@ -52,12 +50,15 @@ class PPO(object):
         }
         self.model = ActorCritic(args)
         self.model.to(self.device)
-        self.running_mean_std = RunningMeanStd(self.obs_shape).to(self.device)
-        self.value_mean_std = RunningMeanStd((1,)).to(self.device)
+
+        # if mode == test, load provided checkpoint
+        if config["test"] == True:
+            checkpoint = torch.load(config["checkpoint"])
+            self.model.load_state_dict(checkpoint["model"])
 
     def configure_output_dir(self, output_dir):
-        self.output_nn = os.path.join(output_dir, "nn")
-        self.output_tb = os.path.join(output_dir, "tb")
+        self.output_nn = os.path.join("runs/" + output_dir, "nn")
+        self.output_tb = os.path.join("runs/" + output_dir, "tb")
         os.makedirs(self.output_nn, exist_ok = True)
         os.makedirs(self.output_tb, exist_ok = True)
 
@@ -95,6 +96,7 @@ class PPO(object):
     def configure_saving(self, ppo_config):
         self.save_freq = ppo_config["save_frequency"]
         self.save_best_after = ppo_config["save_best_after"]
+        self.best_rewards = -1e10
 
     def configure_tensorboard(self):
         self.extra_info = {}
@@ -113,10 +115,22 @@ class PPO(object):
             self.iter_num += 1
             self.agent_steps += self.batch_size
             self.update_policy()
-            print(f"Average Episode Reward: {self.episode_rewards.get_mean()}")
             print(f"Iteration: {self.iter_num}")
-            self._logger()
+            episode_rewards = self.latest_episode_rewards
+            if self.iter_num % self.save_freq == 0:
+                checkpoint = f'ep_{self.iter_num}_reward_{episode_rewards}'
+                self.save_checkpoint(os.path.join(self.output_nn,checkpoint))
+            if episode_rewards > self.best_rewards and self.iter_num > self.save_best_after:
+                print(f"New Best Episode Reward: {episode_rewards}")
+                best = os.path.join(self.output_nn, 'best')
+                self.save_checkpoint(best)
+                self.best_rewards = episode_rewards
 
+    def save_checkpoint(self, name):
+        weights = {
+            'model' : self.model.state_dict(),
+        }
+        torch.save(weights, f'{name}.pth')
 
     def update_policy(self):
 
@@ -129,33 +143,38 @@ class PPO(object):
 
         # compute advantage
         A = rollout_rtgs - rollout_values.detach()
-        # if self.normalize_advantage:
-        #     # normalize advantage
-        #     # helps with training stability according to: https://github.com/ericyangyu/PPO-for-Beginners
-        #     A = (A - A.mean()) / (A.std() + 1e-10)
-        # perform optimization for mini_epochs
+        if self.normalize_advantage:
+            A = (A - A.mean()) / (A.std() + 1e-10)
+
         for k in range(self.mini_epochs):
 
-            action_log_probs = self.model.calculate_action_likelihood(
+            values, action_log_probs = self.model.evaluate(
                 rollout_observations,
                 rollout_actions
             )
-
+            action_log_probs = action_log_probs.to(self.device)
             # calculate r_theta
             r_theta = torch.exp(action_log_probs - rollout_log_probabilities)
+
             # calculate surrogate loss 1
             surrogate_loss_1 = A * r_theta
             # calculate surrogate loss 2
             surrogate_loss_2 = A * torch.clamp(r_theta, 1 - self.e_clip, 1 + self.e_clip)
 
             actor_loss = -1 * torch.min(surrogate_loss_1, surrogate_loss_2).mean()
-            
-            critic_loss = (rollout_values - rollout_rtgs) ** 2
-            loss = actor_loss + 0.5 * critic_loss.mean()
+            critic_loss = ((values - rollout_rtgs) ** 2).mean()
+            loss = actor_loss + 0.5 * critic_loss
+
+            self.actor_loss = actor_loss.clone().detach()
+            self.critic_loss = critic_loss.clone().detach()
 
             self.optimizer.zero_grad()
             loss.backward()
             self.optimizer.step()
+
+            # log tensorboard
+            self._logger()
+
 
     def rollout(self):
         """
@@ -198,9 +217,8 @@ class PPO(object):
                 
                 # apply a_t to environment
                 obs, reward, done, info, _ = self.env.step(action.cpu().numpy())
-                
                 # store a_t, log_prob, r_t, v(o_t)
-                rollout_actions.append(action.item())
+                rollout_actions.append(action)
                 rollout_log_probabilities.append(action_log_prob)
 
                 # update episode length and reward
@@ -209,7 +227,7 @@ class PPO(object):
                 total_rollout_time += 1
             
             # update running average episode length and reward
-            self.episode_rewards.update(torch.tensor(episode_rewards, device=self.device).mean().unsqueeze(0))
+            self.latest_episode_rewards = torch.tensor(episode_rewards, device=self.device).sum().item()
             self.episode_lengths.update(torch.tensor([episode_length], device=self.device))
 
             # add episode reward and value information to rollout buffers
@@ -217,26 +235,25 @@ class PPO(object):
             rollout_values.append(episode_values)
 
         # compute reward-to-go for each visited state in the rollout
-        rollout_rtgs = self.compute_rtgs(rollout_rewards, rollout_values)
+        rollout_rtgs = self.compute_rtgs(rollout_rewards)
         # flatten rollout values
         rollout_values = [val for ep_vals in rollout_values for val in ep_vals]
         # convert to torch tensors and store in dictionary
         rollout_dict = {
             "rollout_observations" : torch.stack(rollout_observations),
             "rollout_values" : torch.stack(rollout_values),
-            "rollout_actions" : torch.tensor(rollout_actions, dtype=torch.float, device=self.device),
-            "rollout_log_probabilities" : torch.tensor(rollout_log_probabilities, dtype=torch.float, device=self.device),
+            "rollout_actions" : torch.stack(rollout_actions),
+            "rollout_log_probabilities" : torch.stack(rollout_log_probabilities).unsqueeze(1),
             "rollout_rtgs" : torch.tensor(rollout_rtgs, device=self.device).unsqueeze(1)
         }
         
         return rollout_dict
 
-    def compute_rtgs(self, rollout_rewards, rollout_values):
+    def compute_rtgs(self, rollout_rewards):
 
         rollout_rtgs = []
-        for (episode_rewards, episode_values) in zip(reversed(rollout_rewards), reversed(rollout_values)):
-            # start with value from final timestep of the episode
-            discounted_future_reward = episode_values[-1]
+        for episode_rewards in reversed(rollout_rewards):
+            discounted_future_reward = 0
             # iterate backwards through the episode, computing rtg for each timestep
             for reward_t in reversed(episode_rewards):
                 discounted_future_reward = reward_t + self.gamma * discounted_future_reward
@@ -245,7 +262,9 @@ class PPO(object):
         return rollout_rtgs
 
     def _logger(self):
-        self.writer.add_scalar('episode_rewards/step', self.episode_rewards.get_mean(), self.agent_steps)
+        self.writer.add_scalar('episode_rewards/step', self.latest_episode_rewards, self.agent_steps)
+        self.writer.add_scalar('actor_loss/step', self.actor_loss, self.agent_steps)
+        self.writer.add_scalar('critic_loss/step', self.critic_loss, self.agent_steps)
 
 
 

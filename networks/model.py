@@ -39,6 +39,7 @@ class ActorCritic(nn.Module):
 
         # instatiate critic network
         self.critic_network = MLP(self.critic_units, self.input_shape)
+        self.critic_value = nn.Linear(self.critic_units[-1], 1)
     
     def _actor_critic(self, observation):
         """
@@ -54,7 +55,8 @@ class ActorCritic(nn.Module):
         """
 
         # pass obs through V net to get state value
-        value = self.critic_network(observation)
+        value_embed = self.critic_network(observation)
+        value = self.critic_value(value_embed)
 
         # pass obs through critic net to get mu, sigma
         actor_embed = self.actor_network(observation)
@@ -63,57 +65,20 @@ class ActorCritic(nn.Module):
 
         return mu, log_sigma, value
 
-    def forward(self, observation_dict):
-        """
-            Forward pass through the actor critic module, returning
-            information required for gradient updates
-
-			Parameters:
-				observation_dict - observation dictionary at the 
-                current timestep. Contains previous action and current
-                observation
-
-			Return:
-                actor_critic_dict - dictionary containing information
-                about the forward pass through the AC module
-		"""
-        observation = observation_dict['observation']
-        previous_action = observation_dict['previous_action']
-
-        # query actor and critic nets
-        mu, log_sigma, value = self._actor_critic(observation)
-        sigma = torch.exp(log_sigma)
-        
-        previous_action_neg_log_prob, entropy = self.query_action_dist_information(
-            mu,
-            sigma,
-            previous_action
-        )
-
-        actor_critic_dict = {
-            "mu" : mu,
-            "sigma" : sigma,
-            "value" : value,
-            "previous_action_neg_log_prob" : previous_action_neg_log_prob,
-            "entropy" : entropy
-        }
-
-        return actor_critic_dict
-
     @torch.no_grad()
     def train_act(self, observation):
         # passes observation through actor network and adds noise
         mu, log_sigma, value = self._actor_critic(observation)
-        previous_action_neg_log_prob, entropy = self.query_action_dist_information(
-            mu,
-            sigma,
-            previous_action
-        )
+        sigma = torch.exp(log_sigma)
+
+        action, action_log_prob, entropy = self.sample_action_dist(mu, sigma)
+        
         actor_critic_dict = {
+            "action" : action,
             "mu" : mu,
             "sigma" : sigma,
             "value" : value,
-            "previous_action_neg_log_prob" : previous_action_neg_log_prob,
+            "action_log_prob" : action_log_prob,
             "entropy" : entropy
         }
         return actor_critic_dict
@@ -125,20 +90,25 @@ class ActorCritic(nn.Module):
         mu, _ , _ = self._actor_critic(observation)
         return mu
 
-    def query_action_dist_information(self, mu, sigma, previous_action):
+    def sample_action_dist(self, mu, sigma):
         # construct current action distribution
         current_action_dist = torch.distributions.Normal(mu, sigma)
+        action = current_action_dist.sample()
 
-        # calculate negative log prob of previous action under
-        # current action distribution 
-        previous_action_neg_log_prob = -1 * current_action_dist.log_prob(previous_action).sum(1)
+        # calculate log prob of action
+        action_log_prob = current_action_dist.log_prob(action).sum()
 
         # calculate entropy of current action dist
         entropy = current_action_dist.entropy().sum(dim=-1)
 
-        return previous_action_neg_log_prob, entropy
+        return action, action_log_prob, entropy
 
-    
+    def evaluate(self, rollout_observations, rollout_actions):
+        mu, log_sigma, values = self._actor_critic(rollout_observations)
+        sigma = torch.exp(log_sigma) # construct diag covariance matrix
 
-
-
+        log_probs = []
+        for (action_i, mu_i, sigma_i) in zip(rollout_actions, mu, sigma):
+            current_action_dist = torch.distributions.Normal(mu_i, sigma_i)
+            log_probs.append(current_action_dist.log_prob(action_i))
+        return values, torch.stack(log_probs)
