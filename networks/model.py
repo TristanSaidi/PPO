@@ -31,12 +31,14 @@ class ActorCritic(nn.Module):
         self.critic_units = kwargs.pop('critic_units')
         self.num_actions = kwargs.pop('num_actions')
         self.input_shape = kwargs.pop('input_shape')
+        self.device = kwargs.pop('device')
 
         # instantiate actor network
         self.actor_network = MLP(self.actor_units, self.input_shape)
         self.actor_mu = nn.Linear(self.actor_units[-1], self.num_actions)
-        self.actor_log_sigma = nn.Linear(self.actor_units[-1], self.num_actions)
-
+		# Initialize the covariance matrix used to query the actor for actions
+        self.cov_var = torch.full(size=(self.num_actions,), fill_value=0.5)
+        self.cov_mat = torch.diag(self.cov_var).to(self.device)
         # instatiate critic network
         self.critic_network = MLP(self.critic_units, self.input_shape)
         self.critic_value = nn.Linear(self.critic_units[-1], 1)
@@ -61,15 +63,13 @@ class ActorCritic(nn.Module):
         # pass obs through critic net to get mu, sigma
         actor_embed = self.actor_network(observation)
         mu = self.actor_mu(actor_embed)
-        log_sigma = self.actor_log_sigma(actor_embed)
 
-        return mu, log_sigma, value
+        return mu, self.cov_mat, value
 
     @torch.no_grad()
     def train_act(self, observation):
         # passes observation through actor network and adds noise
-        mu, log_sigma, value = self._actor_critic(observation)
-        sigma = torch.exp(log_sigma)
+        mu, sigma, value = self._actor_critic(observation)
 
         action, action_log_prob, entropy = self.sample_action_dist(mu, sigma)
         
@@ -92,7 +92,7 @@ class ActorCritic(nn.Module):
 
     def sample_action_dist(self, mu, sigma):
         # construct current action distribution
-        current_action_dist = torch.distributions.Normal(mu, sigma)
+        current_action_dist = torch.distributions.MultivariateNormal(mu, sigma)
         action = current_action_dist.sample()
 
         # calculate log prob of action
@@ -101,14 +101,10 @@ class ActorCritic(nn.Module):
         # calculate entropy of current action dist
         entropy = current_action_dist.entropy().sum(dim=-1)
 
-        return action, action_log_prob, entropy
+        return action.detach(), action_log_prob.detach(), entropy
 
     def evaluate(self, rollout_observations, rollout_actions):
-        mu, log_sigma, values = self._actor_critic(rollout_observations)
-        sigma = torch.exp(log_sigma) # construct diag covariance matrix
-
-        log_probs = []
-        for (action_i, mu_i, sigma_i) in zip(rollout_actions, mu, sigma):
-            current_action_dist = torch.distributions.Normal(mu_i, sigma_i)
-            log_probs.append(current_action_dist.log_prob(action_i))
-        return values, torch.stack(log_probs)
+        mu, sigma, values = self._actor_critic(rollout_observations)
+        dist = torch.distributions.MultivariateNormal(mu, sigma)
+        log_probs = dist.log_prob(rollout_actions).unsqueeze(1)
+        return values, log_probs

@@ -47,6 +47,7 @@ class PPO(object):
             "critic_units" : config["network"]["mlp"]["units"],
             "num_actions" : self.actions_num,
             "input_shape" : self.obs_shape,
+            "device" : self.device
         }
         self.model = ActorCritic(args)
         self.model.to(self.device)
@@ -141,8 +142,14 @@ class PPO(object):
         rollout_log_probabilities = rollout_dict["rollout_log_probabilities"]
         rollout_rtgs = rollout_dict["rollout_rtgs"]
 
-        # compute advantage
-        A = rollout_rtgs - rollout_values.detach()
+        values, _ = self.model.evaluate(
+            rollout_observations,
+            rollout_actions
+        )
+        # compute advantage - values need to come from the evaluate() method
+        # as those will be included in the computation graph for backprop. 
+        # Rollout data is disconnected from comp graph.
+        A = rollout_rtgs - values.detach()
         if self.normalize_advantage:
             A = (A - A.mean()) / (A.std() + 1e-10)
 
@@ -152,7 +159,6 @@ class PPO(object):
                 rollout_observations,
                 rollout_actions
             )
-            action_log_probs = action_log_probs.to(self.device)
             # calculate r_theta
             r_theta = torch.exp(action_log_probs - rollout_log_probabilities)
 
@@ -169,7 +175,7 @@ class PPO(object):
             self.critic_loss = critic_loss.clone().detach()
 
             self.optimizer.zero_grad()
-            loss.backward()
+            loss.backward(retain_graph=True)
             self.optimizer.step()
 
             # log tensorboard
@@ -205,8 +211,7 @@ class PPO(object):
             # loop for single episode
             while not done and episode_length <= self.max_episode_length:
                 # sample a_t from policy
-                obs = torch.tensor(obs, device=self.device)
-                actor_critic_dict = self.model.train_act(obs)
+                actor_critic_dict = self.model.train_act(torch.tensor(obs, device=self.device).squeeze())
 
                 # store o_t, v(o_t)
                 rollout_observations.append(obs)
@@ -240,10 +245,10 @@ class PPO(object):
         rollout_values = [val for ep_vals in rollout_values for val in ep_vals]
         # convert to torch tensors and store in dictionary
         rollout_dict = {
-            "rollout_observations" : torch.stack(rollout_observations),
-            "rollout_values" : torch.stack(rollout_values),
-            "rollout_actions" : torch.stack(rollout_actions),
-            "rollout_log_probabilities" : torch.stack(rollout_log_probabilities).unsqueeze(1),
+            "rollout_observations" : torch.tensor(rollout_observations, device=self.device),
+            "rollout_values" : torch.tensor(rollout_values, device=self.device),
+            "rollout_actions" : torch.tensor(rollout_actions, device=self.device).unsqueeze(1),
+            "rollout_log_probabilities" : torch.tensor(rollout_log_probabilities, device=self.device).unsqueeze(1),
             "rollout_rtgs" : torch.tensor(rollout_rtgs, device=self.device).unsqueeze(1)
         }
         
