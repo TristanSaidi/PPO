@@ -68,7 +68,16 @@ class ActorCritic(nn.Module):
 
     @torch.no_grad()
     def train_act(self, observation):
-        # passes observation through actor network and adds noise
+        """ Forward pass through actor critic module. Meant to 
+        be called in a training related function, as action 
+        includes added stochasticity.
+
+        Args:
+            observation (torch.tensor): environment observation
+
+        Returns:
+            dict: dictionary containing info about forward pass
+        """
         mu, sigma, value = self._actor_critic(observation)
 
         action, action_log_prob, entropy = self.sample_action_dist(mu, sigma)
@@ -86,11 +95,33 @@ class ActorCritic(nn.Module):
 
     @torch.no_grad()
     def test_act(self, observation):
+        """ Forward pass through actor critic module. Meant to
+        be called during inference time.
+
+        Args:
+            observation (torch.tensor): environment observation
+
+        Returns:
+            torch.tensor: mean of action distribution
+        """
         # passes observation through actor network
         mu, _ , _ = self._actor_critic(observation)
         return mu
 
     def sample_action_dist(self, mu, sigma):
+        """ Creates and samples from action distribution based on
+        provided parameters. Function returns sampled action,
+         log probability of that action and the entropy
+        of the dist
+
+        Args:
+            mu (torch.tensor): _description_
+            sigma (torch.tensor): _description_
+
+        Returns:
+            tuple: sampled action, log probability of that action,
+            entropy of action dist
+        """
         # construct current action distribution
         current_action_dist = torch.distributions.MultivariateNormal(mu, sigma)
         action = current_action_dist.sample()
@@ -104,6 +135,16 @@ class ActorCritic(nn.Module):
         return action.detach(), action_log_prob.detach(), entropy
 
     def evaluate(self, rollout_observations, rollout_actions):
+        """ Evaluates the values and log probabilities of visited states
+        and actions (respectively) during rollout.
+
+        Args:
+            rollout_observations (torch.tensor): visited states during rollout
+            rollout_actions (torch.tensor): actions taken during rollout
+
+        Returns:
+            tuple: values and log probabilities
+        """
         mu, sigma, values = self._actor_critic(rollout_observations)
         dist = torch.distributions.MultivariateNormal(mu, sigma)
         log_probs = dist.log_prob(rollout_actions).unsqueeze(1)

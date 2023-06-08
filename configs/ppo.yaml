@@ -1,7 +1,7 @@
 seed: 42
 network:
   mlp:
-    units: [10, 10, 10]
+    units: [64, 64]
 
 checkpoint: '' # path to the checkpoint to load
 device: 'cuda:0'
@@ -29,7 +29,7 @@ ppo:
   truncate_grads: True
   grad_norm: 1.0
   # snapshot setting
-  save_best_after: 0
-  save_frequency: 50
-  max_agent_steps: 1000000
+  save_best_after: 2
+  save_frequency: 10
+  max_agent_steps: 2000000
   max_episode_steps: 200

@@ -2,6 +2,7 @@
 # Tristan Saidi's PPO Implementation
 # PPO base class
 # Adapted from Haozhi Qi's implementation of PPO
+# Adapted from Eric Yang Yu's implementation of PPO
 # --------------------------------------------------------
 
 import copy
@@ -104,11 +105,9 @@ class PPO(object):
         self.writer = SummaryWriter(self.output_tb)
 
     def train(self):
-        """ 
-        Main train loop for the PPO agent. This function calls
-        train_iter() in a loop until the maximum number of steps
-        is exceeded.
-        """ 
+        """ Main train loop for PPO object. Loops until agent exceeds
+        self.max_agent_steps.
+        """
         self.env.reset()
         self.agent_steps = self.batch_size
 
@@ -116,7 +115,8 @@ class PPO(object):
             self.iter_num += 1
             self.agent_steps += self.batch_size
             self.update_policy()
-            print(f"Iteration: {self.iter_num}")
+            print(flush=True)
+            print(f"-------------------- Iteration #{self.iter_num} --------------------", flush=True)
             episode_rewards = self.latest_episode_rewards
             if self.iter_num % self.save_freq == 0:
                 checkpoint = f'ep_{self.iter_num}_reward_{episode_rewards}'
@@ -126,6 +126,13 @@ class PPO(object):
                 best = os.path.join(self.output_nn, 'best')
                 self.save_checkpoint(best)
                 self.best_rewards = episode_rewards
+            else:
+                print(f"Current Best: {self.best_rewards}")
+            print(f"Actor Loss: {self.actor_loss}")
+            print(f"Critic Loss: {self.critic_loss}")
+            print(f"Total agent steps: {self.agent_steps}")
+            print(f"------------------------------------------------------", flush=True)
+            print(flush=True)
 
     def save_checkpoint(self, name):
         weights = {
@@ -134,7 +141,9 @@ class PPO(object):
         torch.save(weights, f'{name}.pth')
 
     def update_policy(self):
-
+        """ Optimizes surrogate objective function self.mini_epochs times
+        based on rollout data.
+        """
         rollout_dict = self.rollout()
         rollout_observations = rollout_dict["rollout_observations"]
         rollout_values = rollout_dict["rollout_values"]
@@ -183,8 +192,7 @@ class PPO(object):
 
 
     def rollout(self):
-        """
-        Rollout the agent for horizon_length number of steps.
+        """ Rollout the agent for horizon_length number of steps.
         
         Returns: tuple containing info about the rollout
         """
@@ -255,7 +263,15 @@ class PPO(object):
         return rollout_dict
 
     def compute_rtgs(self, rollout_rewards):
+        """Computes the return-to-go for each timestep in the rollout
 
+        Args:
+            rollout_rewards (torch.tensor): rewards for each transition
+            of rollout
+
+        Returns:
+            list: list of reward-to-go's
+        """
         rollout_rtgs = []
         for episode_rewards in reversed(rollout_rewards):
             discounted_future_reward = 0
