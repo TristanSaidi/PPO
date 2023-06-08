@@ -14,7 +14,7 @@ pip install -r requirements.txt
 Create a virtual environment and install requirements.
 ```
 python -m venv ~/envs/PPO
-source ~/envs/PPO/activate
+source ~/envs/PPO/bin/activate
 pip install -r requirements.txt
 ```
 
