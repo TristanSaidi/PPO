@@ -1,4 +1,4 @@
-# PPO implementation
+# PPO
 
 My implementation of Proximal Policy Optimization (PPO) adapted from Haozhi Qi's and Eric Yang Yu's implementations. Original PPO paper: https://arxiv.org/abs/1707.06347
 
